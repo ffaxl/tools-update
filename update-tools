@@ -19,9 +19,9 @@ import tempfile
 import urllib.request
 import urllib.error
 import urllib.parse
-import subprocess
 import platform
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 from functools import lru_cache
 from typing import Callable
@@ -55,7 +55,6 @@ logging.basicConfig(level=logging.INFO, format='%(message)s', stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024
-PROGRESS_ENABLED = True
 
 
 def _format_size(num_bytes):
@@ -67,20 +66,88 @@ def _format_size(num_bytes):
   return f"{size:.1f}GiB"
 
 
-def _render_progress(downloaded, total, width=30):
-  if total:
-    frac = min(downloaded / total, 1.0)
-    filled = int(width * frac)
-    bar = '#' * filled + '-' * (width - filled)
-    line = f"\r[{bar}] {frac * 100:5.1f}%  {_format_size(downloaded)}/{_format_size(total)}"
-  else:
-    line = f"\r{_format_size(downloaded)} downloaded"
-  sys.stderr.write(line)
-  sys.stderr.flush()
+class ProgressUI:
+  """Owns progress/color state and renders download progress to stderr.
+
+  Two rendering modes: an interactive, redrawn bar for a real terminal, and
+  a plain append-only '#' bar for redirected/logged output (no \\r tricks,
+  since there's no cursor to move). configure() picks one based on the
+  environment; everything else just calls reporter(total).
+  """
+
+  WIDTH = 30
+  RESET = "\033[0m"
+  BOLD = "\033[1m"
+  BAR_FULL = "\033[36m"   # cyan
+  BAR_EMPTY = "\033[90m"  # gray
+  SIZE_COLOR = "\033[32m"  # green
+
+  def __init__(self):
+    self.progress_enabled = True
+    self.snake_enabled = False
+    self.color_enabled = True
+
+  def configure(self, quiet):
+    is_tty = sys.stderr.isatty()
+    self.progress_enabled = not quiet and is_tty
+    self.snake_enabled = not quiet and not is_tty
+    self.color_enabled = self.progress_enabled and not os.environ.get('NO_COLOR')
+
+  def _colorize(self, text, code):
+    return f"{code}{text}{self.RESET}" if self.color_enabled else text
+
+  def _render_bar(self, downloaded, total):
+    if total:
+      frac = min(downloaded / total, 1.0)
+      filled = int(self.WIDTH * frac)
+      bar = (self._colorize('#' * filled, self.BAR_FULL)
+             + self._colorize('-' * (self.WIDTH - filled), self.BAR_EMPTY))
+      pct = self._colorize(f"{frac * 100:5.1f}%", self.BOLD)
+      size = self._colorize(f"{_format_size(downloaded)}/{_format_size(total)}", self.SIZE_COLOR)
+      line = f"\r\033[K[{bar}] {pct}  {size}"
+    else:
+      line = f"\r\033[K{self._colorize(_format_size(downloaded) + ' downloaded', self.SIZE_COLOR)}"
+    sys.stderr.write(line)
+    sys.stderr.flush()
+
+  def _make_snake_updater(self, total):
+    printed = 0
+
+    def update(downloaded):
+      nonlocal printed
+      if not total:
+        return
+      target = int(self.WIDTH * min(downloaded / total, 1.0))
+      if target > printed:
+        sys.stderr.write('#' * (target - printed))
+        sys.stderr.flush()
+        printed = target
+
+    return update
+
+  @contextmanager
+  def reporter(self, total):
+    """Yields update(downloaded) callable; a no-op when progress is disabled."""
+    if self.progress_enabled:
+      try:
+        yield lambda downloaded: self._render_bar(downloaded, total)
+      finally:
+        sys.stderr.write('\n')
+        sys.stderr.flush()
+      return
+
+    if self.snake_enabled:
+      try:
+        yield self._make_snake_updater(total)
+      finally:
+        sys.stderr.write('\n')
+        sys.stderr.flush()
+      return
+
+    yield lambda downloaded: None
 
 
-def run_cmd(cmd):
-  return subprocess.check_output(cmd, shell=True).decode().strip()
+ui = ProgressUI()
 
 
 @lru_cache()
@@ -125,18 +192,15 @@ def download_to_temp(url, retries=3):
       with urllib.request.urlopen(req, timeout=30) as r:
         total = int(r.headers.get('Content-Length') or 0)
         downloaded = 0
-        while True:
-          chunk = r.read(CHUNK_SIZE)
-          if not chunk:
-            break
-          tf.write(chunk)
-          downloaded += len(chunk)
-          if PROGRESS_ENABLED:
-            _render_progress(downloaded, total)
+        with ui.reporter(total) as report:
+          while True:
+            chunk = r.read(CHUNK_SIZE)
+            if not chunk:
+              break
+            tf.write(chunk)
+            downloaded += len(chunk)
+            report(downloaded)
       tf.close()
-      if PROGRESS_ENABLED:
-        sys.stderr.write('\n')
-        sys.stderr.flush()
       return tf.name
     except Exception as e:
       tf.close()
@@ -278,8 +342,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 def main(argv=None):
   args = parse_args(argv)
 
-  global PROGRESS_ENABLED
-  PROGRESS_ENABLED = not args.quiet and sys.stderr.isatty()
+  ui.configure(quiet=args.quiet)
   if args.quiet:
     logger.setLevel(logging.ERROR)
 
