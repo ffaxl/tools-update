@@ -22,6 +22,7 @@ import urllib.parse
 import platform
 import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from functools import lru_cache
 from typing import Callable
@@ -235,8 +236,35 @@ def extract_zip(zip_path, cmd, bin_dir, archive_member=None):
   Path(zip_path).unlink()
 
 
+STATE_FILE = Path.home() / '.local' / 'state' / 'update-tools.json'
+
+
+def _load_state():
+  try:
+    return json.loads(STATE_FILE.read_text())
+  except (FileNotFoundError, json.JSONDecodeError):
+    return {}
+
+
+def _save_state(state):
+  STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+  STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
 def install(cmd, url, archive_member=None):
   bin_dir = Path.home() / '.local' / 'bin'
+
+  if url is None:
+    raise RuntimeError(f"no download URL resolved for {cmd}")
+
+  # The resolved URL embeds the version for essentially every tool here
+  # (GitHub release assets and the version-lookup URLs both include it), so
+  # comparing it is a good enough proxy for "is this the latest version"
+  # without needing a per-tool `--version` parser.
+  state = _load_state()
+  if state.get(cmd) == url and (bin_dir / cmd).exists():
+    logger.info("==> %s is up to date", cmd)
+    return
 
   logger.info("Installing %s from %s", cmd, url)
 
@@ -253,60 +281,103 @@ def install(cmd, url, archive_member=None):
   binary = Path(bin_dir / cmd)
   binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
   binary.touch()
+
+  state[cmd] = url
+  _save_state(state)
   logger.info("==> installed %s", cmd)
 
 
-def build_registry() -> dict[str, Callable[[], None]]:
-  """Build a name -> installer mapping. Installers are deferred (no network
-  calls happen until invoked), so selecting a subset of tools does not
-  trigger lookups for the ones left out."""
-  registry: dict[str, Callable[[], None]] = {}
+@dataclass(frozen=True)
+class Tool:
+  installer: Callable[[], None]
+  binaries: tuple[str, ...]  # binary names this tool puts in bin_dir
 
-  registry["bao"] = lambda: install("bao", github_url('openbao/openbao', r'openbao_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+def build_registry() -> dict[str, Tool]:
+  """Build a name -> Tool mapping. Installers are deferred (no network calls
+  happen until invoked), so selecting a subset of tools does not trigger
+  lookups for the ones left out. `binaries` records what each tool actually
+  installs, which is more than one name for a bundle like "cfssl"."""
+  registry: dict[str, Tool] = {}
+
+  def add(name, installer, binaries=None):
+    registry[name] = Tool(installer=installer, binaries=binaries or (name,))
+
+  add("bao", lambda: install("bao", github_url('openbao/openbao', r'openbao_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
+
+  cfssl_binaries = ('cfssl', 'cfssl-bundle', 'cfssl-certinfo', 'cfssl-newkey', 'cfssl-scan', 'cfssljson', 'mkbundle', 'multirootca')
 
   def install_cfssl_bundle():
-    for cmd in ('cfssl','cfssl-bundle','cfssl-certinfo','cfssl-newkey','cfssl-scan','cfssljson','mkbundle','multirootca'):
+    for cmd in cfssl_binaries:
       install(cmd, github_url('cloudflare/cfssl', cmd + r'_.*_linux_' + get_arch_deb()))
 
-  registry["cfssl"] = install_cfssl_bundle
+  add("cfssl", install_cfssl_bundle, binaries=cfssl_binaries)
 
-  registry["dockle"] = lambda: install("dockle", github_url('goodwithtech/dockle', r'dockle_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
+  add("dockle", lambda: install("dockle", github_url('goodwithtech/dockle', r'dockle_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz')))
 
-  registry["etcdctl"] = lambda: install("etcdctl", github_url('etcd-io/etcd', r'etcd-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
+  add("etcdctl", lambda: install("etcdctl", github_url('etcd-io/etcd', r'etcd-v.*-linux-' + get_arch_deb() + r'\.tar\.gz')))
 
-  registry["grype"] = lambda: install("grype", github_url('anchore/grype', r'grype_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  add("grype", lambda: install("grype", github_url('anchore/grype', r'grype_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
-  registry["hadolint"] = lambda: install("hadolint", github_url('hadolint/hadolint', r'hadolint-linux-' + get_arch_tj()))
+  add("hadolint", lambda: install("hadolint", github_url('hadolint/hadolint', r'hadolint-linux-' + get_arch_tj())))
 
-  registry["helm"] = lambda: install("helm", 'https://get.helm.sh/helm-' + fetch_url('https://get.helm.sh/helm4-latest-version') + '-linux-' + get_arch_deb() + '.tar.gz')
+  add("helm", lambda: install("helm", 'https://get.helm.sh/helm-' + fetch_url('https://get.helm.sh/helm4-latest-version') + '-linux-' + get_arch_deb() + '.tar.gz'))
 
-  registry["jq"] = lambda: install("jq", github_url('stedolan/jq', r'jq-linux-' + get_arch_deb()))
+  add("jq", lambda: install("jq", github_url('stedolan/jq', r'jq-linux-' + get_arch_deb())))
 
-  registry["k6"] = lambda: install("k6", github_url('grafana/k6', r'k6-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
+  add("k6", lambda: install("k6", github_url('grafana/k6', r'k6-v.*-linux-' + get_arch_deb() + r'\.tar\.gz')))
 
-  registry["k9s"] = lambda: install("k9s", github_url('derailed/k9s', r'k9s_Linux_' + get_arch_deb() + r'\.tar\.gz'))
+  add("k9s", lambda: install("k9s", github_url('derailed/k9s', r'k9s_Linux_' + get_arch_deb() + r'\.tar\.gz')))
 
-  registry["kubectl"] = lambda: install("kubectl", 'https://storage.googleapis.com/kubernetes-release/release/' + fetch_url('https://storage.googleapis.com/kubernetes-release/release/stable.txt') + '/bin/linux/' + get_arch_deb() + '/kubectl')
+  add("kubectl", lambda: install("kubectl", 'https://storage.googleapis.com/kubernetes-release/release/' + fetch_url('https://storage.googleapis.com/kubernetes-release/release/stable.txt') + '/bin/linux/' + get_arch_deb() + '/kubectl'))
 
-  registry["lego"] = lambda: install("lego", github_url('go-acme/lego', r'lego_v.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  add("lego", lambda: install("lego", github_url('go-acme/lego', r'lego_v.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
-  registry["logcli"] = lambda: install("logcli", github_url('grafana/loki', r'logcli-linux-' + get_arch_deb() + r'\.zip'), "logcli-linux-" + get_arch_deb())
+  add("logcli", lambda: install("logcli", github_url('grafana/loki', r'logcli-linux-' + get_arch_deb() + r'\.zip'), "logcli-linux-" + get_arch_deb()))
 
-  registry["mc"] = lambda: install("mc", 'https://dl.min.io/client/mc/release/linux-' + get_arch_deb() + '/mc')
+  add("mc", lambda: install("mc", 'https://dl.min.io/client/mc/release/linux-' + get_arch_deb() + '/mc'))
 
-  registry["talosctl"] = lambda: install("talosctl", github_url('siderolabs/talos', r'talosctl-linux-' + get_arch_deb()))
+  add("talosctl", lambda: install("talosctl", github_url('siderolabs/talos', r'talosctl-linux-' + get_arch_deb())))
 
-  registry["tofu"] = lambda: install("tofu", github_url('opentofu/opentofu', r'tofu_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  add("tofu", lambda: install("tofu", github_url('opentofu/opentofu', r'tofu_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
-  registry["repo-security-scanner"] = lambda: install("repo-security-scanner", github_url('techjacker/repo-security-scanner', r'repo-security-scanner_.*_Linux_' + get_arch_tj() + r'\.tar\.gz'))
+  add("repo-security-scanner", lambda: install("repo-security-scanner", github_url('techjacker/repo-security-scanner', r'repo-security-scanner_.*_Linux_' + get_arch_tj() + r'\.tar\.gz')))
 
-  registry["syft"] = lambda: install("syft", github_url('anchore/syft', r'syft_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  add("syft", lambda: install("syft", github_url('anchore/syft', r'syft_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
-  registry["trivy"] = lambda: install("trivy", github_url('aquasecurity/trivy', r'trivy_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
+  add("trivy", lambda: install("trivy", github_url('aquasecurity/trivy', r'trivy_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz')))
 
-  registry["yq"] = lambda: install("yq", github_url('mikefarah/yq', r'yq_linux_' + get_arch_deb()))
+  add("yq", lambda: install("yq", github_url('mikefarah/yq', r'yq_linux_' + get_arch_deb())))
 
   return registry
+
+
+def known_binaries(registry: dict[str, Tool]):
+  """Every binary name build_registry() can currently produce."""
+  binaries = set()
+  for tool in registry.values():
+    binaries.update(tool.binaries)
+  return binaries
+
+
+def prune_removed_tools(registry: dict[str, Tool]):
+  """Remove binaries (and their state entries) that a previous run installed
+  but that no longer belong to any tool in the registry, e.g. after a tool
+  was dropped from build_registry()."""
+  state = _load_state()
+  managed = known_binaries(registry)
+  bin_dir = Path.home() / '.local' / 'bin'
+
+  stale = [name for name in state if name not in managed]
+  for name in stale:
+    binary = bin_dir / name
+    if binary.exists():
+      binary.unlink()
+      logger.info("==> removed %s (no longer in update-tools)", name)
+    del state[name]
+
+  if stale:
+    _save_state(state)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -339,6 +410,11 @@ def parse_args(argv=None) -> argparse.Namespace:
   return args
 
 
+EXIT_OK = 0
+EXIT_FAILED = 1   # ran fine, but one or more tools failed to update
+EXIT_USAGE = 2    # bad arguments (matches argparse's own parser.error() exit code)
+
+
 def main(argv=None):
   args = parse_args(argv)
 
@@ -347,6 +423,7 @@ def main(argv=None):
     logger.setLevel(logging.ERROR)
 
   registry = build_registry()
+  prune_removed_tools(registry)
 
   if args.all:
     selected = list(registry)
@@ -356,10 +433,19 @@ def main(argv=None):
     if unknown:
       logger.error("Unknown tool(s): %s", ", ".join(unknown))
       logger.error("Available tools: %s", ", ".join(sorted(registry)))
-      sys.exit(1)
+      sys.exit(EXIT_USAGE)
 
+  failed = []
   for name in selected:
-    registry[name]()
+    try:
+      registry[name].installer()
+    except Exception as e:
+      logger.error("==> failed to update %s: %s", name, e)
+      failed.append(name)
+
+  if failed:
+    logger.error("Did not update: %s", ", ".join(failed))
+    sys.exit(EXIT_FAILED)
 
 
 if __name__ == '__main__':
