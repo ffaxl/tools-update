@@ -184,6 +184,25 @@ def github_url(repo, match):
   return None
 
 
+def gitlab_url(project, match):
+  logger.info("Resolving GitLab release asset for %s", project)
+
+  url = f"https://gitlab.com/api/v4/projects/{urllib.parse.quote(project, safe='')}/releases"
+  releases = json.loads(fetch_url(url))
+  if not releases:
+    logger.error("No releases found for %s", project)
+    return None
+
+  for link in releases[0].get('assets', {}).get('links', []):
+    if re.search(r'^' + match + r'$', link['name']):
+      asset_url = link['direct_asset_url']
+      logger.info("==> resolved %s -> %s", project, asset_url)
+      return asset_url
+
+  logger.error("No matching asset found for %s (%s)", project, match)
+  return None
+
+
 def download_to_temp(url, retries=3):
   logger.info("==> downloading %s", url)
   for attempt in range(1, retries+1):
@@ -317,6 +336,10 @@ def build_registry() -> dict[str, Tool]:
 
   add("etcdctl", lambda: install("etcdctl", github_url('etcd-io/etcd', r'etcd-v.*-linux-' + get_arch_deb() + r'\.tar\.gz')))
 
+  add("gh", lambda: install("gh", github_url('cli/cli', r'gh_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
+
+  add("glab", lambda: install("glab", gitlab_url('gitlab-org/cli', r'glab_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
+
   add("grype", lambda: install("grype", github_url('anchore/grype', r'grype_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
   add("hadolint", lambda: install("hadolint", github_url('hadolint/hadolint', r'hadolint-linux-' + get_arch_tj())))
@@ -335,7 +358,9 @@ def build_registry() -> dict[str, Tool]:
 
   add("logcli", lambda: install("logcli", github_url('grafana/loki', r'logcli-linux-' + get_arch_deb() + r'\.zip'), "logcli-linux-" + get_arch_deb()))
 
-  add("mc", lambda: install("mc", 'https://dl.min.io/client/mc/release/linux-' + get_arch_deb() + '/mc'))
+  # upstream minio/mc was archived 2026-07-14; pgsty/mc is the community fork,
+  # renamed to "mcli" to avoid trading on MinIO's trademark
+  add("mcli", lambda: install("mcli", github_url('pgsty/mc', r'mcli_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
   add("talosctl", lambda: install("talosctl", github_url('siderolabs/talos', r'talosctl-linux-' + get_arch_deb())))
 
