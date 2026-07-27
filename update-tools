@@ -1,0 +1,200 @@
+#!/usr/bin/python3 -B
+"""update-tools: download and install CLI tools (Python port)
+
+Behaviors:
+- resolve GitHub release asset by regex (uses GITHUB_TOKEN if set)
+- download raw URLs
+- extract tar.gz or zip archives, optionally a single member
+- install binary to $HOME/.local/bin and set +x permission
+"""
+
+import os
+import re
+import sys
+import json
+import stat
+import shutil
+import tempfile
+import urllib.request
+import urllib.error
+import urllib.parse
+import subprocess
+import platform
+import logging
+from pathlib import Path
+from functools import lru_cache
+
+
+def get_arch_deb():
+  mapping = {
+    'x86_64': 'amd64',
+    'aarch64': 'arm64',
+  }
+  return mapping[platform.machine().lower()]
+
+
+def get_arch_aqua():
+  mapping = {
+    'x86_64': '64bit',
+    'aarch64': 'ARM64',
+  }
+  return mapping[platform.machine().lower()]
+
+
+def get_arch_tj():
+  mapping = {
+    'x86_64': 'x86_64',
+    'aarch64': 'arm64',
+  }
+  return mapping[platform.machine().lower()]
+
+
+logging.basicConfig(level=logging.INFO, format='%(message)s', stream=sys.stderr)
+logger = logging.getLogger(__name__)
+
+
+def run_cmd(cmd):
+  return subprocess.check_output(cmd, shell=True).decode().strip()
+
+
+@lru_cache()
+def fetch_url(url, headers = ()):
+  req = urllib.request.Request(url)
+  req.add_header('User-Agent', 'update-tools/1.0')
+  for h,v in headers:
+    req.add_header(h, v)
+
+  with urllib.request.urlopen(req) as r:
+    data = r.read().decode().strip()
+  return data
+
+
+def github_url(repo, match):
+  logger.info("Resolving GitHub release asset for %s", repo)
+
+  url = f"https://api.github.com/repos/{repo}/releases/latest"
+
+  headers = (('Accept', 'application/vnd.github.v3+json'),)
+  token = os.environ.get("GITHUB_TOKEN")
+  if token:
+    headers += (("Authorization", f"Bearer {token}"),)
+
+  data = json.loads(fetch_url(url, tuple(headers)))
+  for asset in data['assets']:
+    if re.search(r'^' + match + r'$', asset['name']):
+      browser_download_url = asset['browser_download_url']
+      logger.info("==> resolved %s -> %s", repo, browser_download_url)
+      return browser_download_url
+
+  logger.error("No matching asset found for %s (%s)", repo, match)
+  return None
+
+
+def download_to_temp(url, retries=3):
+  logger.info("==> downloading %s", url)
+  for attempt in range(1, retries+1):
+    try:
+      req = urllib.request.Request(url)
+      with urllib.request.urlopen(req, timeout=30) as r:
+        tf = tempfile.NamedTemporaryFile(delete=False)
+        shutil.copyfileobj(r, tf)
+        tf.close()
+        return tf.name
+    except Exception as e:
+      if attempt == retries:
+        raise
+      logger.error("download failed (attempt %d/%d): %s", attempt, retries, e)
+  raise RuntimeError("download failed")
+
+
+def extract_tar(tar_path, cmd, bin_dir, archive_member=None):
+  if not archive_member:
+    archive_member = cmd
+  import tarfile
+  logger.info("==> tar: extracting %s to %s", cmd, bin_dir)
+  with tarfile.open(tar_path, "r:gz") as tf:
+    for m in tf.getmembers():
+      if Path(m.name).name == archive_member and m.isfile():
+        f = tf.extractfile(m)
+        with open(bin_dir / cmd, 'wb') as out_f:
+          shutil.copyfileobj(f, out_f)
+  Path(tar_path).unlink()
+
+def extract_zip(zip_path, cmd, bin_dir, archive_member=None):
+  if not archive_member:
+    archive_member = cmd
+  import zipfile
+  logger.info("==> zip: extracting %s to %s", cmd, bin_dir)
+  with zipfile.ZipFile(zip_path) as zf:
+    with zf.open(archive_member) as src, open(bin_dir / cmd, 'wb') as dst:
+      shutil.copyfileobj(src, dst)
+  Path(zip_path).unlink()
+
+
+def install(cmd, url, archive_member=None):
+  bin_dir = Path.home() / '.local' / 'bin'
+
+  logger.info("Installing %s from %s", cmd, url)
+
+  tmp = download_to_temp(url)
+
+  decoded_url = urllib.parse.unquote(url)
+  if decoded_url.endswith('.tar.gz') or decoded_url.endswith('.tgz'):
+    extract_tar(tmp, cmd, bin_dir, archive_member)
+  elif decoded_url.endswith('.zip'):
+    extract_zip(tmp, cmd, bin_dir, archive_member)
+  else:
+    shutil.move(tmp, bin_dir / cmd)
+
+  binary = Path(bin_dir / cmd)
+  binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+  binary.touch()
+  logger.info("==> installed %s", cmd)
+
+
+def main():
+
+  install("bao", github_url('openbao/openbao', r'openbao_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+  for cmd in ('cfssl','cfssl-bundle','cfssl-certinfo','cfssl-newkey','cfssl-scan','cfssljson','mkbundle','multirootca'):
+    install(cmd, github_url('cloudflare/cfssl', cmd + r'_.*_linux_' + get_arch_deb()))
+
+  install("dockle", github_url('goodwithtech/dockle', r'dockle_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
+
+  install("etcdctl", github_url('etcd-io/etcd', r'etcd-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
+
+  install("grype", github_url('anchore/grype', r'grype_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+  install("hadolint", github_url('hadolint/hadolint', r'hadolint-linux-' + get_arch_tj()))
+
+  install("helm", 'https://get.helm.sh/helm-' + fetch_url('https://get.helm.sh/helm4-latest-version') + '-linux-' + get_arch_deb() + '.tar.gz')
+
+  install("jq", github_url('stedolan/jq', r'jq-linux-' + get_arch_deb()))
+
+  install("k6", github_url('grafana/k6', r'k6-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
+
+  install("k9s", github_url('derailed/k9s', r'k9s_Linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+  install("kubectl", 'https://storage.googleapis.com/kubernetes-release/release/' + fetch_url('https://storage.googleapis.com/kubernetes-release/release/stable.txt') + '/bin/linux/' + get_arch_deb() + '/kubectl')
+
+  install("lego", github_url('go-acme/lego', r'lego_v.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+  install("logcli", github_url('grafana/loki', r'logcli-linux-' + get_arch_deb() + r'\.zip'), "logcli-linux-" + get_arch_deb())
+  
+  install("mc", 'https://dl.min.io/client/mc/release/linux-' + get_arch_deb() + '/mc')
+
+  install("talosctl", github_url('siderolabs/talos', r'talosctl-linux-' + get_arch_deb()))
+
+  install("tofu", github_url('opentofu/opentofu', r'tofu_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+  install("repo-security-scanner", github_url('techjacker/repo-security-scanner', r'repo-security-scanner_.*_Linux_' + get_arch_tj() + r'\.tar\.gz'))
+
+  install("syft", github_url('anchore/syft', r'syft_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+  install("trivy", github_url('aquasecurity/trivy', r'trivy_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
+
+  install("yq", github_url('mikefarah/yq', r'yq_linux_' + get_arch_deb()))
+
+
+if __name__ == '__main__':
+  main()
