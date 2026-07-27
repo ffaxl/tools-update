@@ -8,6 +8,7 @@ Behaviors:
 - install binary to $HOME/.local/bin and set +x permission
 """
 
+import argparse
 import os
 import re
 import sys
@@ -23,6 +24,7 @@ import platform
 import logging
 from pathlib import Path
 from functools import lru_cache
+from typing import Callable
 
 
 def get_arch_deb():
@@ -152,48 +154,100 @@ def install(cmd, url, archive_member=None):
   logger.info("==> installed %s", cmd)
 
 
-def main():
+def build_registry() -> dict[str, Callable[[], None]]:
+  """Build a name -> installer mapping. Installers are deferred (no network
+  calls happen until invoked), so selecting a subset of tools does not
+  trigger lookups for the ones left out."""
+  registry: dict[str, Callable[[], None]] = {}
 
-  install("bao", github_url('openbao/openbao', r'openbao_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  registry["bao"] = lambda: install("bao", github_url('openbao/openbao', r'openbao_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
 
-  for cmd in ('cfssl','cfssl-bundle','cfssl-certinfo','cfssl-newkey','cfssl-scan','cfssljson','mkbundle','multirootca'):
-    install(cmd, github_url('cloudflare/cfssl', cmd + r'_.*_linux_' + get_arch_deb()))
+  def install_cfssl_bundle():
+    for cmd in ('cfssl','cfssl-bundle','cfssl-certinfo','cfssl-newkey','cfssl-scan','cfssljson','mkbundle','multirootca'):
+      install(cmd, github_url('cloudflare/cfssl', cmd + r'_.*_linux_' + get_arch_deb()))
 
-  install("dockle", github_url('goodwithtech/dockle', r'dockle_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
+  registry["cfssl"] = install_cfssl_bundle
 
-  install("etcdctl", github_url('etcd-io/etcd', r'etcd-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
+  registry["dockle"] = lambda: install("dockle", github_url('goodwithtech/dockle', r'dockle_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
 
-  install("grype", github_url('anchore/grype', r'grype_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  registry["etcdctl"] = lambda: install("etcdctl", github_url('etcd-io/etcd', r'etcd-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
 
-  install("hadolint", github_url('hadolint/hadolint', r'hadolint-linux-' + get_arch_tj()))
+  registry["grype"] = lambda: install("grype", github_url('anchore/grype', r'grype_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
 
-  install("helm", 'https://get.helm.sh/helm-' + fetch_url('https://get.helm.sh/helm4-latest-version') + '-linux-' + get_arch_deb() + '.tar.gz')
+  registry["hadolint"] = lambda: install("hadolint", github_url('hadolint/hadolint', r'hadolint-linux-' + get_arch_tj()))
 
-  install("jq", github_url('stedolan/jq', r'jq-linux-' + get_arch_deb()))
+  registry["helm"] = lambda: install("helm", 'https://get.helm.sh/helm-' + fetch_url('https://get.helm.sh/helm4-latest-version') + '-linux-' + get_arch_deb() + '.tar.gz')
 
-  install("k6", github_url('grafana/k6', r'k6-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
+  registry["jq"] = lambda: install("jq", github_url('stedolan/jq', r'jq-linux-' + get_arch_deb()))
 
-  install("k9s", github_url('derailed/k9s', r'k9s_Linux_' + get_arch_deb() + r'\.tar\.gz'))
+  registry["k6"] = lambda: install("k6", github_url('grafana/k6', r'k6-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
 
-  install("kubectl", 'https://storage.googleapis.com/kubernetes-release/release/' + fetch_url('https://storage.googleapis.com/kubernetes-release/release/stable.txt') + '/bin/linux/' + get_arch_deb() + '/kubectl')
+  registry["k9s"] = lambda: install("k9s", github_url('derailed/k9s', r'k9s_Linux_' + get_arch_deb() + r'\.tar\.gz'))
 
-  install("lego", github_url('go-acme/lego', r'lego_v.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  registry["kubectl"] = lambda: install("kubectl", 'https://storage.googleapis.com/kubernetes-release/release/' + fetch_url('https://storage.googleapis.com/kubernetes-release/release/stable.txt') + '/bin/linux/' + get_arch_deb() + '/kubectl')
 
-  install("logcli", github_url('grafana/loki', r'logcli-linux-' + get_arch_deb() + r'\.zip'), "logcli-linux-" + get_arch_deb())
-  
-  install("mc", 'https://dl.min.io/client/mc/release/linux-' + get_arch_deb() + '/mc')
+  registry["lego"] = lambda: install("lego", github_url('go-acme/lego', r'lego_v.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
 
-  install("talosctl", github_url('siderolabs/talos', r'talosctl-linux-' + get_arch_deb()))
+  registry["logcli"] = lambda: install("logcli", github_url('grafana/loki', r'logcli-linux-' + get_arch_deb() + r'\.zip'), "logcli-linux-" + get_arch_deb())
 
-  install("tofu", github_url('opentofu/opentofu', r'tofu_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  registry["mc"] = lambda: install("mc", 'https://dl.min.io/client/mc/release/linux-' + get_arch_deb() + '/mc')
 
-  install("repo-security-scanner", github_url('techjacker/repo-security-scanner', r'repo-security-scanner_.*_Linux_' + get_arch_tj() + r'\.tar\.gz'))
+  registry["talosctl"] = lambda: install("talosctl", github_url('siderolabs/talos', r'talosctl-linux-' + get_arch_deb()))
 
-  install("syft", github_url('anchore/syft', r'syft_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+  registry["tofu"] = lambda: install("tofu", github_url('opentofu/opentofu', r'tofu_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
 
-  install("trivy", github_url('aquasecurity/trivy', r'trivy_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
+  registry["repo-security-scanner"] = lambda: install("repo-security-scanner", github_url('techjacker/repo-security-scanner', r'repo-security-scanner_.*_Linux_' + get_arch_tj() + r'\.tar\.gz'))
 
-  install("yq", github_url('mikefarah/yq', r'yq_linux_' + get_arch_deb()))
+  registry["syft"] = lambda: install("syft", github_url('anchore/syft', r'syft_.*_linux_' + get_arch_deb() + r'\.tar\.gz'))
+
+  registry["trivy"] = lambda: install("trivy", github_url('aquasecurity/trivy', r'trivy_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz'))
+
+  registry["yq"] = lambda: install("yq", github_url('mikefarah/yq', r'yq_linux_' + get_arch_deb()))
+
+  return registry
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+  parser = argparse.ArgumentParser(
+    description="Download and install CLI tools to ~/.local/bin",
+  )
+  parser.add_argument(
+    "tools",
+    nargs="*",
+    metavar="TOOL",
+    help="Tool(s) to update",
+  )
+  parser.add_argument(
+    "--all",
+    action="store_true",
+    help="Update all known tools",
+  )
+  args = parser.parse_args(argv)
+
+  if args.all and args.tools:
+    parser.error("cannot combine --all with specific TOOL arguments")
+  if not args.all and not args.tools:
+    parser.error("specify one or more TOOL names, or use --all to update everything")
+
+  return args
+
+
+def main(argv=None):
+  args = parse_args(argv)
+  registry = build_registry()
+
+  if args.all:
+    selected = list(registry)
+  else:
+    selected = list(dict.fromkeys(args.tools))
+    unknown = [name for name in selected if name not in registry]
+    if unknown:
+      logger.error("Unknown tool(s): %s", ", ".join(unknown))
+      logger.error("Available tools: %s", ", ".join(sorted(registry)))
+      sys.exit(1)
+
+  for name in selected:
+    registry[name]()
 
 
 if __name__ == '__main__':
