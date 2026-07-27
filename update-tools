@@ -54,6 +54,30 @@ def get_arch_tj():
 logging.basicConfig(level=logging.INFO, format='%(message)s', stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
+CHUNK_SIZE = 64 * 1024
+PROGRESS_ENABLED = True
+
+
+def _format_size(num_bytes):
+  size = float(num_bytes)
+  for unit in ('B', 'KiB', 'MiB'):
+    if size < 1024:
+      return f"{size:.1f}{unit}"
+    size /= 1024
+  return f"{size:.1f}GiB"
+
+
+def _render_progress(downloaded, total, width=30):
+  if total:
+    frac = min(downloaded / total, 1.0)
+    filled = int(width * frac)
+    bar = '#' * filled + '-' * (width - filled)
+    line = f"\r[{bar}] {frac * 100:5.1f}%  {_format_size(downloaded)}/{_format_size(total)}"
+  else:
+    line = f"\r{_format_size(downloaded)} downloaded"
+  sys.stderr.write(line)
+  sys.stderr.flush()
+
 
 def run_cmd(cmd):
   return subprocess.check_output(cmd, shell=True).decode().strip()
@@ -95,14 +119,28 @@ def github_url(repo, match):
 def download_to_temp(url, retries=3):
   logger.info("==> downloading %s", url)
   for attempt in range(1, retries+1):
+    tf = tempfile.NamedTemporaryFile(delete=False)
     try:
       req = urllib.request.Request(url)
       with urllib.request.urlopen(req, timeout=30) as r:
-        tf = tempfile.NamedTemporaryFile(delete=False)
-        shutil.copyfileobj(r, tf)
-        tf.close()
-        return tf.name
+        total = int(r.headers.get('Content-Length') or 0)
+        downloaded = 0
+        while True:
+          chunk = r.read(CHUNK_SIZE)
+          if not chunk:
+            break
+          tf.write(chunk)
+          downloaded += len(chunk)
+          if PROGRESS_ENABLED:
+            _render_progress(downloaded, total)
+      tf.close()
+      if PROGRESS_ENABLED:
+        sys.stderr.write('\n')
+        sys.stderr.flush()
+      return tf.name
     except Exception as e:
+      tf.close()
+      Path(tf.name).unlink(missing_ok=True)
       if attempt == retries:
         raise
       logger.error("download failed (attempt %d/%d): %s", attempt, retries, e)
@@ -222,6 +260,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     action="store_true",
     help="Update all known tools",
   )
+  parser.add_argument(
+    "-q", "--quiet",
+    action="store_true",
+    help="Suppress progress bars and info logs; only show errors",
+  )
   args = parser.parse_args(argv)
 
   if args.all and args.tools:
@@ -234,6 +277,12 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None):
   args = parse_args(argv)
+
+  global PROGRESS_ENABLED
+  PROGRESS_ENABLED = not args.quiet and sys.stderr.isatty()
+  if args.quiet:
+    logger.setLevel(logging.ERROR)
+
   registry = build_registry()
 
   if args.all:
