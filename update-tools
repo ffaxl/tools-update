@@ -380,6 +380,8 @@ def build_registry() -> dict[str, Tool]:
 
   add("repo-security-scanner", lambda: install("repo-security-scanner", github_url('techjacker/repo-security-scanner', r'repo-security-scanner_.*_Linux_' + get_arch_tj() + r'\.tar\.gz')))
 
+  add("sops", lambda: install("sops", github_url('getsops/sops', r'sops-v.*\.linux\.' + get_arch_deb())))
+
   add("syft", lambda: install("syft", github_url('anchore/syft', r'syft_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
   add("trivy", lambda: install("trivy", github_url('aquasecurity/trivy', r'trivy_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz')))
