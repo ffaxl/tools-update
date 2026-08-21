@@ -334,6 +334,15 @@ def build_registry() -> dict[str, Tool]:
   def add(name, installer, binaries=None):
     registry[name] = Tool(installer=installer, binaries=binaries or (name,))
 
+  age_binaries = ('age', 'age-keygen')
+
+  def install_age_bundle():
+    url = github_url('FiloSottile/age', r'age-v.*-linux-' + get_arch_deb() + r'\.tar\.gz')
+    for cmd in age_binaries:
+      install(cmd, url, cmd)
+
+  add("age", install_age_bundle, binaries=age_binaries)
+
   add("bao", lambda: install("bao", github_url('openbao/openbao', r'openbao_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
   cfssl_binaries = ('cfssl', 'cfssl-bundle', 'cfssl-certinfo', 'cfssl-newkey', 'cfssl-scan', 'cfssljson', 'mkbundle', 'multirootca')
