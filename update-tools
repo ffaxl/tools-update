@@ -348,6 +348,8 @@ def build_registry() -> dict[str, Tool]:
   age_binaries = ('age', 'age-keygen')
   add_bundle("age", age_binaries, lambda cmd: github_url('FiloSottile/age', r'age-v.*-linux-' + get_arch_deb() + r'\.tar\.gz'))
 
+  add("argocd", lambda: install("argocd", github_url('argoproj/argo-cd', r'argocd-linux-' + get_arch_deb())))
+
   add("bao", lambda: install("bao", github_url('openbao/openbao', r'openbao_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
 
   cfssl_binaries = ('cfssl', 'cfssl-bundle', 'cfssl-certinfo', 'cfssl-newkey', 'cfssl-scan', 'cfssljson', 'mkbundle', 'multirootca')
