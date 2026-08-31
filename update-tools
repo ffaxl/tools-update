@@ -355,6 +355,8 @@ def build_registry() -> dict[str, Tool]:
   cfssl_binaries = ('cfssl', 'cfssl-bundle', 'cfssl-certinfo', 'cfssl-newkey', 'cfssl-scan', 'cfssljson', 'mkbundle', 'multirootca')
   add_bundle("cfssl", cfssl_binaries, lambda cmd: github_url('cloudflare/cfssl', cmd + r'_.*_linux_' + get_arch_deb()))
 
+  add("chezmoi", lambda: install("chezmoi", github_url('twpayne/chezmoi', r'chezmoi_.*_linux_' + get_arch_deb() + r'\.tar\.gz')))
+
   add("dockle", lambda: install("dockle", github_url('goodwithtech/dockle', r'dockle_.*_Linux-' + get_arch_aqua() + r'\.tar\.gz')))
 
   add("etcdctl", lambda: install("etcdctl", github_url('etcd-io/etcd', r'etcd-v.*-linux-' + get_arch_deb() + r'\.tar\.gz')))
